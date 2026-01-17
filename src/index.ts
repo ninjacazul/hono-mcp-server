@@ -1,2 +1,2 @@
-export { mcp, describe } from "./mcp";
-export type { McpOptions } from "./mcp";
+export { mcp, registerTool } from "./mcp";
+export type { McpOptions, DescribeConfig } from "./mcp";

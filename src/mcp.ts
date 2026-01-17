@@ -1,26 +1,112 @@
 import { Hono } from "hono";
-import type { Env, Handler } from "hono";
+import type { Context, Env, Handler, MiddlewareHandler, ValidationTargets } from "hono";
+import type { RouterRoute, H } from "hono/types";
+import { validator } from "hono/validator";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
-const MCP_DESCRIPTION = Symbol("mcp_description");
+// Configuration for registerTool()
+export interface DescribeConfig<
+  TInput extends z.ZodRawShape = z.ZodRawShape,
+  TOutput extends z.ZodRawShape = z.ZodRawShape,
+> {
+  description: string;
+  inputSchema?: TInput;
+  outputSchema?: TOutput;
+  annotations?: ToolAnnotations;
+}
+
+// Internal metadata storage
+interface ToolMetadata {
+  description: string;
+  inputSchema?: z.ZodRawShape;
+  outputSchema?: z.ZodRawShape;
+  annotations?: ToolAnnotations;
+}
+
+const toolMetadata = new WeakMap<Function, ToolMetadata>();
 
 /**
- * Add a description to a route handler for MCP tool generation.
+ * Register a route as an MCP tool with description and optional schemas.
+ * Always returns middleware - the actual handler should be a separate function.
  *
  * @example
  * ```ts
- * app.get('/users', describe('List all users', (c) => c.json([])))
+ * // Simple description
+ * app.get('/users', registerTool('List all users'), (c) => c.json([]))
+ *
+ * // With config
+ * app.get('/users', registerTool({ description: 'List all users' }), (c) => c.json([]))
+ *
+ * // With inputSchema - use c.req.valid('json') for typed input
+ * app.post('/users',
+ *   registerTool({ description: 'Create a user', inputSchema: { name: z.string() } }),
+ *   async (c) => {
+ *     const { name } = c.req.valid('json') // typed!
+ *     return c.json({ id: 1, name })
+ *   }
+ * )
  * ```
  */
-export function describe<H extends Handler>(description: string, handler: H): H {
-  (handler as any)[MCP_DESCRIPTION] = description;
-  return handler;
+// Overload: string description
+export function registerTool(
+  description: string,
+): MiddlewareHandler;
+// Overload: config with inputSchema - provides typed validation
+export function registerTool<TInput extends z.ZodRawShape, TOutput extends z.ZodRawShape = z.ZodRawShape>(
+  config: DescribeConfig<TInput, TOutput> & { inputSchema: TInput },
+): MiddlewareHandler<Env, string, { in: { json: z.infer<z.ZodObject<TInput>> }; out: { json: z.infer<z.ZodObject<TInput>> } }>;
+// Overload: config without inputSchema
+export function registerTool<TOutput extends z.ZodRawShape>(
+  config: DescribeConfig<z.ZodRawShape, TOutput>,
+): MiddlewareHandler;
+// Implementation
+export function registerTool(
+  descriptionOrConfig: string | DescribeConfig,
+): MiddlewareHandler {
+  const metadata: ToolMetadata =
+    typeof descriptionOrConfig === "string"
+      ? { description: descriptionOrConfig }
+      : {
+          description: descriptionOrConfig.description,
+          inputSchema: descriptionOrConfig.inputSchema,
+          outputSchema: descriptionOrConfig.outputSchema,
+          annotations: descriptionOrConfig.annotations,
+        };
+
+  // If inputSchema is defined, return validating middleware
+  if (metadata.inputSchema) {
+    const schema = z.object(metadata.inputSchema);
+    const middleware = validator("json", (value) => {
+      const result = schema.safeParse(value);
+      if (!result.success) {
+        throw new Error(result.error.message);
+      }
+      return result.data;
+    });
+    toolMetadata.set(middleware, metadata);
+    return middleware;
+  }
+
+  // Otherwise return pass-through middleware that just stores metadata
+  const middleware: MiddlewareHandler = async (_c, next) => {
+    await next();
+  };
+  toolMetadata.set(middleware, metadata);
+  return middleware;
+}
+
+function getToolMetadata(handler: unknown): ToolMetadata | undefined {
+  if (typeof handler === "function") {
+    return toolMetadata.get(handler);
+  }
+  return undefined;
 }
 
 function getDescription(handler: unknown): string | undefined {
-  return (handler as any)?.[MCP_DESCRIPTION];
+  return getToolMetadata(handler)?.description;
 }
 
 // WorkerLoader interface (matches @cloudflare/workers-types)
@@ -55,6 +141,7 @@ interface Route {
   method: HttpMethod;
   path: string;
   description: string;
+  handler: H;
 }
 
 const CORS_HEADERS = {
@@ -121,10 +208,11 @@ export function mcp<E extends Env>(app: Hono<E>, options: McpOptions): Hono<E> {
     );
 
   const handleMcp = codemode
-    ? async (c: any) => {
+    ? async (c: Context<E>) => {
         if (c.req.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
 
-        const loader = c.env?.[loaderBinding] as WorkerLoader | undefined;
+        const env = c.env as Record<string, unknown> | undefined;
+        const loader = env?.[loaderBinding] as WorkerLoader | undefined;
         if (!loader) {
           return new Response(
             `Codemode requires ${loaderBinding} binding. Add worker_loaders to wrangler.jsonc.`,
@@ -139,11 +227,11 @@ export function mcp<E extends Env>(app: Hono<E>, options: McpOptions): Hono<E> {
         server.connect(transport);
         return withCors(await transport.handleRequest(c.req.raw));
       }
-    : async (c: any) => {
+    : async (c: Context<E>) => {
         if (c.req.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
 
         const server = createServer();
-        for (const route of routes) registerTool(server, route, app);
+        for (const route of routes) registerRouteAsTool(server, route, app);
 
         const transport = new WebStandardStreamableHTTPServerTransport();
         server.connect(transport);
@@ -156,15 +244,11 @@ export function mcp<E extends Env>(app: Hono<E>, options: McpOptions): Hono<E> {
   return app;
 }
 
-function extractRoutes(app: Hono<any>): Route[] {
+function extractRoutes<E extends Env>(app: Hono<E>): Route[] {
   const routes: Route[] = [];
   const seen = new Set<string>();
 
-  const honoRoutes = (app as any).routes as Array<{
-    path: string;
-    method: string;
-    handler: Function;
-  }>;
+  const honoRoutes: RouterRoute[] = app.routes;
 
   if (!honoRoutes) return routes;
 
@@ -178,7 +262,7 @@ function extractRoutes(app: Hono<any>): Route[] {
     seen.add(key);
 
     const description = getDescription(route.handler) || generateDescription(method, route.path);
-    routes.push({ method: method as HttpMethod, path: route.path, description });
+    routes.push({ method: method as HttpMethod, path: route.path, description, handler: route.handler });
   }
 
   return routes;
@@ -215,19 +299,35 @@ function extractPathParams(path: string): string[] {
   return matches ? matches.map((m) => m.slice(1)) : [];
 }
 
-function registerTool(server: McpServer, route: Route, app: Hono<any>): void {
+function registerRouteAsTool<E extends Env>(server: McpServer, route: Route, app: Hono<E>): void {
   const toolName = generateToolName(route.method, route.path);
   const pathParams = extractPathParams(route.path);
+  const metadata = getToolMetadata(route.handler);
 
-  const inputShape: Record<string, z.ZodType> = {};
-  for (const param of pathParams) {
-    inputShape[param] = z.string().describe(`Path parameter: ${param}`);
-  }
-  if (["POST", "PUT", "PATCH"].includes(route.method)) {
-    inputShape["body"] = z.record(z.unknown()).optional().describe("Request body as JSON object");
-  }
-  if (["GET", "DELETE"].includes(route.method)) {
-    inputShape["query"] = z.record(z.string()).optional().describe("Query parameters");
+  // Use metadata.inputSchema if available, otherwise generate default schema
+  let inputShape: Record<string, z.ZodType>;
+
+  if (metadata?.inputSchema) {
+    // Use the provided input schema from metadata
+    inputShape = { ...metadata.inputSchema };
+    // Still need to add path params if not already present
+    for (const param of pathParams) {
+      if (!(param in inputShape)) {
+        inputShape[param] = z.string().describe(`Path parameter: ${param}`);
+      }
+    }
+  } else {
+    // Generate default schema
+    inputShape = {};
+    for (const param of pathParams) {
+      inputShape[param] = z.string().describe(`Path parameter: ${param}`);
+    }
+    if (["POST", "PUT", "PATCH"].includes(route.method)) {
+      inputShape["body"] = z.record(z.unknown()).optional().describe("Request body as JSON object");
+    }
+    if (["GET", "DELETE"].includes(route.method)) {
+      inputShape["query"] = z.record(z.string()).optional().describe("Query parameters");
+    }
   }
 
   server.registerTool(
@@ -235,6 +335,8 @@ function registerTool(server: McpServer, route: Route, app: Hono<any>): void {
     {
       description: `${route.description}\n\n${route.method} ${route.path}`,
       inputSchema: Object.keys(inputShape).length > 0 ? inputShape : undefined,
+      ...(metadata?.outputSchema && { outputSchema: metadata.outputSchema }),
+      ...(metadata?.annotations && { annotations: metadata.annotations }),
     },
     async (params: Record<string, unknown>) => {
       let url = route.path;
@@ -262,9 +364,26 @@ function registerTool(server: McpServer, route: Route, app: Hono<any>): void {
       try {
         const response = await app.fetch(new Request(`http://internal${url}`, init));
         const contentType = response.headers.get("content-type") || "";
-        const text = contentType.includes("application/json")
-          ? JSON.stringify(await response.json(), null, 2)
-          : await response.text();
+        const isJson = contentType.includes("application/json");
+
+        if (isJson) {
+          const json = await response.json();
+          // Return structured content if outputSchema is defined
+          if (metadata?.outputSchema) {
+            return {
+              structuredContent: json,
+              content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+              isError: !response.ok,
+            };
+          }
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(json, null, 2) }],
+            isError: !response.ok,
+          };
+        }
+
+        // Plain text response
+        const text = await response.text();
         return { content: [{ type: "text" as const, text }], isError: !response.ok };
       } catch (error) {
         return {
@@ -336,10 +455,10 @@ async function executeSearch(
   return (await entrypoint.evaluate()) as { result?: unknown; error?: string };
 }
 
-async function executeCode(
+async function executeCode<E extends Env>(
   loader: WorkerLoader,
   code: string,
-  app: Hono<any>,
+  app: Hono<E>,
 ): Promise<{ result?: unknown; error?: string }> {
   const workerId = `execute-${crypto.randomUUID()}`;
 
@@ -375,10 +494,10 @@ async function executeCode(
   return (await entrypoint.evaluate(fetch)) as { result?: unknown; error?: string };
 }
 
-function registerCodemodeTools(
+function registerCodemodeTools<E extends Env>(
   server: McpServer,
   routes: Route[],
-  app: Hono<any>,
+  app: Hono<E>,
   loader: WorkerLoader,
 ): void {
   const apiSchema = routesToApiSchema(routes);

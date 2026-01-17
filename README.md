@@ -6,20 +6,25 @@ Expose your [Hono](https://hono.dev) API endpoints as [MCP](https://modelcontext
 
 ```ts
 import { Hono } from "hono";
-import { mcp, describe } from "hono-mcp-server";
+import { z } from "zod";
+import { mcp, registerTool } from "hono-mcp-server";
 
 const app = new Hono()
-  .get(
-    "/users",
-    describe("List all users", (c) => c.json([{ id: 1, name: "Alice" }])),
-  )
-  .get(
-    "/users/:id",
-    describe("Get user by ID", (c) => c.json({ id: c.req.param("id") })),
-  )
+  .get("/users", registerTool("List all users"), (c) => c.json([{ id: 1, name: "Alice" }]))
+  .get("/users/:id", registerTool("Get user by ID"), (c) => c.json({ id: c.req.param("id") }))
   .post(
     "/users",
-    describe("Create a user", async (c) => c.json(await c.req.json(), 201)),
+    registerTool({
+      description: "Create a new user",
+      inputSchema: {
+        name: z.string().describe("User's full name"),
+        email: z.string().email().describe("User's email address"),
+      },
+    }),
+    async (c) => {
+      const { name } = c.req.valid("json"); // typed!
+      return c.json({ id: 1, name });
+    },
   );
 
 export default mcp(app, {
@@ -29,6 +34,35 @@ export default mcp(app, {
 ```
 
 This adds an `/mcp` endpoint that exposes your routes as MCP tools.
+
+## Input & Output Schemas
+
+Use `registerTool()` with `inputSchema` for validated, typed input. Access validated data with `c.req.valid('json')`:
+
+```ts
+import { z } from "zod";
+import { registerTool } from "hono-mcp-server";
+
+app.post(
+  "/search",
+  registerTool({
+    description: "Search for items",
+    inputSchema: {
+      query: z.string().describe("Search query"),
+      limit: z.number().optional().describe("Max results"),
+    },
+    outputSchema: {
+      results: z.array(z.object({ id: z.string(), title: z.string() })),
+    },
+  }),
+  async (c) => {
+    const { query, limit } = c.req.valid("json"); // typed!
+    return c.json({ results: [] });
+  },
+);
+```
+
+When `outputSchema` is defined, the tool returns structured content that MCP clients can parse.
 
 ## Options
 

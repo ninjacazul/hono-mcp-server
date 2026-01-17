@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { mcp, describe } from "hono-mcp-server";
+import { z } from "zod";
+import { mcp, registerTool } from "hono-mcp-server";
 
-// Create your API with inline descriptions using describe()
 const app = new Hono()
   .get("/", (c) =>
     c.json({
@@ -10,45 +10,83 @@ const app = new Hono()
       mcp: "/mcp",
     }),
   )
+  // With output schema for structured responses
   .get(
     "/users",
-    describe("List all users in the system", (c) =>
-      c.json([
-        { id: 1, name: "Alice", email: "alice@example.com" },
-        { id: 2, name: "Bob", email: "bob@example.com" },
-      ])),
+    registerTool({
+      description: "List all users in the system",
+      outputSchema: {
+        users: z.array(
+          z.object({
+            id: z.number(),
+            name: z.string(),
+            email: z.string(),
+          }),
+        ),
+      },
+    }),
+    (c) =>
+      c.json({
+        users: [
+          { id: 1, name: "Alice", email: "alice@example.com" },
+          { id: 2, name: "Bob", email: "bob@example.com" },
+        ],
+      }),
   )
+  // Simple description
   .get(
     "/users/:id",
-    describe("Get a specific user by their ID", (c) => {
+    registerTool("Get a specific user by their ID"),
+    (c) => {
       const id = c.req.param("id");
       return c.json({ id: Number(id), name: "Alice", email: "alice@example.com" });
-    }),
+    },
   )
+  // With inputSchema - use c.req.valid('json') for typed input
   .post(
     "/users",
-    describe("Create a new user", async (c) => {
-      const body = await c.req.json();
-      return c.json({ id: 3, ...body }, 201);
+    registerTool({
+      description: "Create a new user",
+      inputSchema: {
+        name: z.string().describe("User's full name"),
+        email: z.string().email().describe("User's email address"),
+      },
     }),
+    async (c) => {
+      const { name, email } = c.req.valid("json"); // typed!
+      return c.json({ id: 3, name, email }, 201);
+    },
   )
+  // With both inputSchema and outputSchema
   .put(
     "/users/:id",
-    describe("Update an existing user", async (c) => {
-      const id = c.req.param("id");
-      const body = await c.req.json();
-      return c.json({ id: Number(id), ...body });
+    registerTool({
+      description: "Update an existing user",
+      inputSchema: {
+        name: z.string().optional().describe("User's full name"),
+        email: z.string().email().optional().describe("User's email address"),
+      },
+      outputSchema: {
+        id: z.number(),
+        name: z.string(),
+        email: z.string(),
+      },
     }),
+    async (c) => {
+      const id = c.req.param("id");
+      const { name, email } = c.req.valid("json"); // typed!
+      return c.json({ id: Number(id), name: name ?? "", email: email ?? "" });
+    },
   )
   .delete(
     "/users/:id",
-    describe("Delete a user", (c) => {
+    registerTool("Delete a user"),
+    (c) => {
       const id = c.req.param("id");
       return c.json({ deleted: true, id: Number(id) });
-    }),
+    },
   );
 
-// That's it! Wrap with mcp() and you get /mcp endpoint
 export default mcp(app, {
   name: "Users API",
   version: "1.0.0",

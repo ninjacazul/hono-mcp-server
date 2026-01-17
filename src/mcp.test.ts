@@ -1,6 +1,7 @@
 import { describe as testDescribe, it, expect } from "vitest";
 import { Hono } from "hono";
-import { mcp, describe } from "./mcp";
+import { z } from "zod";
+import { mcp, registerTool } from "./mcp";
 
 testDescribe("mcp", () => {
   it("adds /mcp endpoint to app", async () => {
@@ -64,10 +65,7 @@ testDescribe("mcp", () => {
   });
 
   it("uses custom descriptions from describe()", async () => {
-    const app = new Hono().get(
-      "/users",
-      describe("My custom description", (c) => c.json([])),
-    );
+    const app = new Hono().get("/users", registerTool("My custom description"), (c) => c.json([]));
 
     const wrapped = mcp(app, { name: "Test", version: "1.0.0" });
 
@@ -138,7 +136,6 @@ testDescribe("mcp", () => {
     );
 
     const text = await res.text();
-    // JSON is escaped in the MCP response
     expect(text).toContain('\\"id\\": \\"42\\"');
     expect(text).toContain("Bob");
   });
@@ -493,12 +490,117 @@ testDescribe("mcp", () => {
   });
 });
 
-testDescribe("describe", () => {
-  it("attaches description to handler", () => {
-    const handler = (c: any) => c.json([]);
-    const described = describe("Test description", handler);
+testDescribe("registerTool", () => {
+  it("returns middleware with string description", () => {
+    const middleware = registerTool("Test description");
+    expect(typeof middleware).toBe("function");
+  });
 
-    expect(described).toBe(handler);
-    // The description is stored on the handler
+  it("returns middleware with config object", () => {
+    const middleware = registerTool({ description: "Test description" });
+    expect(typeof middleware).toBe("function");
+  });
+
+  it("uses inputSchema from describe config", async () => {
+    const app = new Hono().post(
+      "/users",
+      registerTool({
+        description: "Create a new user",
+        inputSchema: {
+          name: z.string().describe("User name"),
+          email: z.string().email().describe("User email"),
+        },
+      }),
+      async (c) => {
+        const { name } = c.req.valid("json");
+        return c.json({ id: 1, name });
+      },
+    );
+
+    const wrapped = mcp(app, { name: "Test", version: "1.0.0" });
+
+    const res = await wrapped.fetch(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/list",
+          params: {},
+        }),
+      }),
+    );
+
+    const text = await res.text();
+    expect(text).toContain("Create a new user");
+    expect(text).toContain("name");
+    expect(text).toContain("email");
+    expect(text).toContain("User name");
+    expect(text).toContain("User email");
+  });
+
+  it("returns structuredContent when outputSchema is defined", async () => {
+    const app = new Hono().get(
+      "/users",
+      registerTool({
+        description: "List users",
+        outputSchema: {
+          users: z.array(z.object({ id: z.number(), name: z.string() })),
+        },
+      }),
+      (c) => c.json({ users: [{ id: 1, name: "Alice" }] }),
+    );
+
+    const wrapped = mcp(app, { name: "Test", version: "1.0.0" });
+
+    const res = await wrapped.fetch(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "get_users", arguments: {} },
+        }),
+      }),
+    );
+
+    const text = await res.text();
+    expect(text).toContain("structuredContent");
+    expect(text).toContain("Alice");
+  });
+
+  it("returns plain text for text responses", async () => {
+    const app = new Hono().get("/hello", registerTool("Say hello"), (c) => c.text("Hello, World!"));
+
+    const wrapped = mcp(app, { name: "Test", version: "1.0.0" });
+
+    const res = await wrapped.fetch(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "get_hello", arguments: {} },
+        }),
+      }),
+    );
+
+    const text = await res.text();
+    expect(text).toContain("Hello, World!");
+    expect(text).not.toContain("structuredContent");
   });
 });
