@@ -1,0 +1,59 @@
+{
+  "name": "hono-mcp-server",
+  "version": "0.0.1",
+  "description": "hono app as mcp server",
+  "keywords": [
+    "api",
+    "cloudflare-workers",
+    "hono",
+    "mcp",
+    "model-context-protocol",
+    "server"
+  ],
+  "license": "MIT",
+  "author": "Matt Carey <mcarey@cloudflare.com>",
+  "workspaces": [
+    "examples/*"
+  ],
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "prepublishOnly": "npm run build",
+    "check": "npm run typecheck && npm run format:check && npm run lint",
+    "typecheck": "tsc --noEmit",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt .",
+    "lint": "oxlint --ignore-pattern node_modules --ignore-pattern .wrangler --ignore-pattern dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "examples:types": "npm run types --workspaces"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "hono": "^4.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.24.0",
+    "oxlint": "^1.39.0",
+    "tsdown": "^0.20.0-beta.3",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.0",
+    "wrangler": "^4.59.2"
+  },
+  "peerDependencies": {
+    "hono": "^4.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "baseUrl": ".",
+    "paths": {
+      "hono-mcp-server": ["../../src/index.ts"]
+    }
+  },
+  "include": ["./**/*", "../../src/**/*", "worker-configuration.d.ts"],
+  "exclude": ["node_modules"]
+}

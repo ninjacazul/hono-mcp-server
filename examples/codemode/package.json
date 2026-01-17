@@ -1,0 +1,14 @@
+{
+  "name": "hono-mcp-server-codemode-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "hono-mcp-server": "file:../.."
+  }
+}
