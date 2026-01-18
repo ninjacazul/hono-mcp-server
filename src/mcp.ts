@@ -194,49 +194,55 @@ export function mcp<E extends Env>(app: Hono<E>, options: McpOptions): Hono<E> {
     ...(options.description && { description: options.description }),
   };
 
-  const createServer = () =>
-    new McpServer(
-      serverInfo,
-      options.instructions
-        ? { instructions: options.instructions }
-        : codemode
-          ? {
-              instructions:
-                "Use 'search' to find available endpoints, then 'execute' to run code against the API.",
-            }
-          : undefined,
-    );
+  const server = new McpServer(
+    serverInfo,
+    options.instructions
+      ? { instructions: options.instructions }
+      : codemode
+        ? {
+            instructions:
+              "Use 'search' to find available endpoints, then 'execute' to run code against the API.",
+          }
+        : undefined,
+  );
 
-  const handleMcp = codemode
-    ? async (c: Context<E>) => {
-        if (c.req.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
+  const transport = new WebStandardStreamableHTTPServerTransport();
 
-        const env = c.env as Record<string, unknown> | undefined;
-        const loader = env?.[loaderBinding] as WorkerLoader | undefined;
-        if (!loader) {
-          return new Response(
-            `Codemode requires ${loaderBinding} binding. Add worker_loaders to wrangler.jsonc.`,
-            { status: 500 },
-          );
-        }
+  // Register tools at startup
+  if (codemode) {
+    // For codemode, use a getter that captures the current request's loader
+    let currentLoader: WorkerLoader | undefined;
+    registerCodemodeTools(server, routes, app, () => currentLoader);
 
-        const server = createServer();
-        registerCodemodeTools(server, routes, app, loader);
+    // Connect server to transport
+    server.connect(transport);
 
-        const transport = new WebStandardStreamableHTTPServerTransport();
-        server.connect(transport);
-        return withCors(await transport.handleRequest(c.req.raw));
-      }
-    : async (c: Context<E>) => {
-        if (c.req.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
+    const handleMcp = async (c: Context<E>) => {
+      if (c.req.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
 
-        const server = createServer();
-        for (const route of routes) registerRouteAsTool(server, route, app);
+      // Capture loader from current request's env
+      const env = c.env as Record<string, unknown> | undefined;
+      currentLoader = env?.[loaderBinding] as WorkerLoader | undefined;
 
-        const transport = new WebStandardStreamableHTTPServerTransport();
-        server.connect(transport);
-        return withCors(await transport.handleRequest(c.req.raw));
-      };
+      return withCors(await transport.handleRequest(c.req.raw));
+    };
+
+    app.all(`${mcpPath}/*`, handleMcp);
+    app.all(mcpPath, handleMcp);
+
+    return app;
+  }
+
+  for (const route of routes) registerRouteAsTool(server, route, app);
+
+  // Connect server to transport
+  server.connect(transport);
+
+  const handleMcp = async (c: Context<E>) => {
+    if (c.req.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
+
+    return withCors(await transport.handleRequest(c.req.raw));
+  };
 
   app.all(`${mcpPath}/*`, handleMcp);
   app.all(mcpPath, handleMcp);
@@ -367,7 +373,7 @@ function registerRouteAsTool<E extends Env>(server: McpServer, route: Route, app
         const isJson = contentType.includes("application/json");
 
         if (isJson) {
-          const json = await response.json();
+          const json = (await response.json()) as Record<string, unknown>;
           // Return structured content if outputSchema is defined
           if (metadata?.outputSchema) {
             return {
@@ -498,7 +504,7 @@ function registerCodemodeTools<E extends Env>(
   server: McpServer,
   routes: Route[],
   app: Hono<E>,
-  loader: WorkerLoader,
+  getLoader: () => WorkerLoader | undefined,
 ): void {
   const apiSchema = routesToApiSchema(routes);
 
@@ -518,6 +524,13 @@ Example:
       },
     },
     async ({ code }) => {
+      const loader = getLoader();
+      if (!loader) {
+        return {
+          content: [{ type: "text" as const, text: "Error: LOADER binding not available" }],
+          isError: true,
+        };
+      }
       const result = await executeSearch(loader, code as string, apiSchema);
       if (result.error) {
         return {
@@ -548,6 +561,13 @@ Example:
       inputSchema: { code: z.string().describe("JavaScript async arrow function to execute") },
     },
     async ({ code }) => {
+      const loader = getLoader();
+      if (!loader) {
+        return {
+          content: [{ type: "text" as const, text: "Error: LOADER binding not available" }],
+          isError: true,
+        };
+      }
       const result = await executeCode(loader, code as string, app);
       if (result.error) {
         return {
