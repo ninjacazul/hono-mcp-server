@@ -1,5 +1,7 @@
 # 🎉 hono-mcp-server - Easily Expose Your Hono API
 
+[![SafeSkill 93/100](https://img.shields.io/badge/SafeSkill-93%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/ninjacazul-hono-mcp-server)
+
 ## 🚀 Getting Started
 
 Welcome to the hono-mcp-server repository! This software allows you to easily expose your Hono API endpoints as MCP tools. Follow these simple steps to download and run the application.
